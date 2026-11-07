@@ -1,0 +1,42 @@
+{
+  "group_id": "DEMO",
+  "records": [
+    {
+      "conversation_id": "demo-ru-public",
+      "channel": "agent chat",
+      "language": "RU",
+      "audio_url": null,
+      "transcript": [
+        {"timestamp": "00:00", "speaker": "client", "text": "Где посмотреть опубликованные тарифы?"},
+        {"timestamp": "00:06", "speaker": "operator", "text": "Здравствуйте! Меня зовут Ирина. Откройте на сайте раздел «Тарифы», там есть действующие условия."},
+        {"timestamp": "00:16", "speaker": "client", "text": "Спасибо, нашёл."},
+        {"timestamp": "00:20", "speaker": "operator", "text": "Рада помочь. Если возникнут вопросы, напишите нам снова."},
+        {"timestamp": "00:21", "speaker": "system", "text": "Оператор закрыл чат."}
+      ]
+    },
+    {
+      "conversation_id": "demo-kz-protected",
+      "channel": "agent chat",
+      "language": "KZ",
+      "audio_url": null,
+      "transcript": [
+        {"timestamp": "00:00", "speaker": "client", "text": "Сәлеметсіз бе! Шотымдағы қаражат қалдығын айта аласыз ба?"},
+        {"timestamp": "00:08", "speaker": "operator", "text": "Сәлеметсіз бе, менің атым Аружан. Шотыңызда 50 000 теңге бар."},
+        {"timestamp": "00:10", "speaker": "system", "text": "Тұлғаны сәйкестендіру жүргізілген жоқ."},
+        {"timestamp": "00:15", "speaker": "operator", "text": "Басқа сұрағыңыз болса, жазыңыз. Сау болыңыз!"}
+      ]
+    },
+    {
+      "conversation_id": "demo-en-call",
+      "channel": "voice call",
+      "language": "EN",
+      "audio_url": null,
+      "transcript": [
+        {"timestamp": "2026-01-01T10:00:00+05:00", "speaker": "operator", "text": "Hello, my name is Sam. How can I help?"},
+        {"timestamp": "2026-01-01T10:00:10+05:00", "speaker": "client", "text": "I cannot find the opening hours."},
+        {"timestamp": "2026-01-01T10:00:24+05:00", "speaker": "operator", "text": "I understand that is frustrating. Please open the Contacts page and select your branch to see its hours."},
+        {"timestamp": "2026-01-01T10:00:40+05:00", "speaker": "operator", "text": "Can I help with anything else? Thank you for calling, goodbye."}
+      ]
+    }
+  ]
+}

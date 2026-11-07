@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CQA · Проверка качества диалогов</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="/static/app.js" type="module"></script>
+</head>
+<body>
+    <header class="masthead">
+        <div>
+            <div class="eyebrow">CONVERSATION QUALITY ANALYTICS</div>
+            <h1>Проверка качества диалогов</h1>
+        </div>
+        <a class="api-link" href="/docs">Документация API ↗</a>
+    </header>
+
+    <main>
+        <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+        <div class="columns">
+            <section class="panel" aria-labelledby="import-heading">
+                <h2 id="import-heading">1. Загрузить диалоги</h2>
+                <label>Группа <input id="group" value="DEV" maxlength="256" autocomplete="off" required></label>
+                <div class="actions">
+                    <button id="import-organizers" type="button">Импортировать из API</button>
+                </div>
+                <div class="file-row">
+                    <label>Или загрузить JSON <input id="file" type="file" accept=".json,application/json"></label>
+                    <button id="import-file" class="secondary" type="button">Загрузить файл</button>
+                </div>
+            </section>
+
+            <section class="panel" aria-labelledby="run-heading">
+                <h2 id="run-heading">2. Запустить оценку</h2>
+                <label>Диалог <select id="conversation"></select></label>
+                <label>Чек-лист <select id="checklist"></select></label>
+                <div class="actions">
+                    <button id="run-one" type="button">Оценить диалог</button>
+                    <button id="run-group" class="secondary" type="button">Оценить группу</button>
+                    <button id="preview-conversation" class="secondary" type="button">Открыть транскрипт</button>
+                </div>
+                <p id="run-status" aria-live="polite" hidden></p>
+                <p id="run-error" class="notice error" role="status" hidden></p>
+                <ul id="jobs" class="job-list"></ul>
+                <div id="opened-evaluations" class="actions" aria-label="Открытые оценки"></div>
+            </section>
+        </div>
+
+        <details class="panel" id="editor">
+            <summary>Редактор чек-листа</summary>
+            <form id="checklist-form">
+                <p id="editor-version" class="muted"></p>
+                <label>Название <input id="checklist-name" required></label>
+                <div id="criteria-editor"></div>
+                <div class="actions">
+                    <button id="add-criterion" class="secondary" type="button">Добавить критерий</button>
+                    <button type="submit">Сохранить новую версию</button>
+                </div>
+            </form>
+        </details>
+
+        <section class="panel" id="review" aria-labelledby="review-heading" hidden>
+            <div class="review-heading">
+                <div><h2 id="review-heading">3. Проверить результат</h2><p id="review-meta" class="muted"></p></div>
+                <div id="scores" class="score-row"></div>
+            </div>
+            <p id="gross-flags" class="notice error" hidden></p>
+            <p id="section-scores" class="muted" hidden></p>
+            <div class="review-grid">
+                <div><h3>Критерии</h3><div id="results"></div></div>
+                <div class="transcript-column">
+                    <h3>Транскрипт</h3>
+                    <a id="audio" target="_blank" rel="noopener noreferrer" hidden>Открыть запись ↗</a>
+                    <ol id="transcript" class="transcript"></ol>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <dialog id="preview-dialog" aria-labelledby="preview-title">
+        <h2 id="preview-title">Транскрипт</h2>
+        <p id="preview-meta" class="muted"></p>
+        <label>Версия диалога <select id="preview-version"></select></label>
+        <p id="preview-error" class="notice error" role="alert" hidden></p>
+        <a id="preview-audio" target="_blank" rel="noopener noreferrer" hidden>Открыть запись ↗</a>
+        <ol id="preview-transcript" class="transcript"></ol>
+        <form method="dialog"><button type="submit" class="secondary">Закрыть</button></form>
+    </dialog>
+
+    <dialog id="appeal-dialog" aria-labelledby="appeal-title">
+        <form id="appeal-form">
+            <h2 id="appeal-title"></h2>
+            <label id="decision-field" hidden>Решение
+                <select id="decision"><option value="confirm">Подтвердить</option><option value="change">Изменить оценку</option></select>
+            </label>
+            <label id="answer-field" hidden>Новый ответ <select id="answer"></select></label>
+            <label><span id="appeal-comment-label"></span><textarea id="appeal-comment" rows="4" required></textarea></label>
+            <p id="appeal-error" class="notice error" role="alert" hidden></p>
+            <div class="actions">
+                <button id="cancel-appeal" type="button" class="secondary">Отмена</button>
+                <button id="submit-appeal" type="submit">Сохранить</button>
+            </div>
+        </form>
+    </dialog>
+</body>
+</html>

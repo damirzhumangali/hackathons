@@ -1,0 +1,78 @@
+:root {
+    color-scheme: light;
+    --ink: #172637;
+    --muted: #52647b;
+    --border: #d6dee8;
+    --brand: #124a64;
+    --canvas: #f2f5f8;
+    font: 16px/1.45 system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--canvas);
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+button, input, select, textarea { font: inherit; }
+a { color: var(--brand); }
+.masthead {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 1.5rem max(1rem, calc((100vw - 74rem) / 2));
+    color: #fff;
+    background: #102c3e;
+}
+.eyebrow { font-size: .72rem; font-weight: 700; letter-spacing: .1em; color: #a8d5df; }
+.masthead h1 { margin: .25rem 0 0; font-size: clamp(1.3rem, 3vw, 2rem); }
+.api-link { color: #d6eef2; white-space: nowrap; }
+main { max-width: 76rem; margin: 0 auto; padding: 1rem; }
+.columns, .review-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.panel { margin-bottom: 1rem; padding: 1.15rem; background: #fff; border: 1px solid var(--border); border-radius: .8rem; min-width: 0; }
+h2, h3 { margin: 0 0 .75rem; }
+h2 { font-size: 1.2rem; }
+h3 { font-size: 1rem; }
+label { display: grid; gap: .3rem; margin: 0 0 .65rem; font-size: .92rem; font-weight: 600; }
+input, select, textarea { width: 100%; min-width: 0; padding: .48rem .6rem; color: var(--ink); background: #fff; border: 1px solid #9aaabe; border-radius: .4rem; }
+textarea { resize: vertical; }
+input[type=file] { padding: .35rem; }
+button { cursor: pointer; padding: .45rem .7rem; border: 1px solid var(--brand); border-radius: .4rem; background: var(--brand); color: #fff; font-weight: 600; }
+button:disabled { opacity: .55; cursor: wait; }
+button.secondary { background: #fff; color: var(--brand); }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; margin: .45rem 0; }
+.file-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .55rem; margin-top: .8rem; }
+.file-row label { margin: 0; }
+.notice { padding: .6rem .8rem; border-left: 4px solid #267084; background: #e8f5f7; overflow-wrap: anywhere; }
+.notice.error { border-color: #a33028; background: #fff0ed; color: #742018; }
+summary { cursor: pointer; font-weight: 700; }
+details.criterion, .result { border: 1px solid var(--border); border-radius: .5rem; padding: .65rem .75rem; margin: .6rem 0; }
+.criterion[open] > summary { margin-bottom: .6rem; }
+.editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .25rem .7rem; }
+.scale-options { min-width: 0; margin: .6rem 0; border: 1px solid var(--border); border-radius: .4rem; }
+.scale-option { display: grid; grid-template-columns: minmax(4rem, 1fr) minmax(0, 4fr) auto; gap: .55rem; align-items: start; }
+.muted, .meta { color: var(--muted); }
+.review-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .65rem; }
+.review-heading h2, .review-heading p { margin: 0; }
+.score-row { display: flex; gap: .5rem; }
+.score { min-width: 6rem; padding: .4rem .65rem; background: #edf4f7; border-radius: .4rem; font-size: .78rem; }
+.score strong { display: block; font-size: 1.25rem; }
+.review-grid { margin-top: 1rem; }
+.result p { margin: .45rem 0; overflow-wrap: anywhere; }
+.result h4 { margin: 0; }
+.result .meta, .appeal-history { font-size: .88rem; }
+.appeal-history { border-top: 1px solid var(--border); margin-top: .65rem; padding-top: .25rem; }
+.transcript { list-style: none; padding: 0; margin: .65rem 0 0; }
+.message { margin: 0 0 .55rem; border-left: 3px solid #94a8b9; padding: .4rem .65rem; background: #f4f7fa; scroll-margin-top: 1rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+.message[data-speaker=operator] { border-color: #247884; }
+.message:target, .message.highlight { outline: 2px solid #1b7382; background: #e3f4f4; }
+.message .meta { font-size: .78rem; font-weight: 700; margin-bottom: .2rem; }
+.job-list { margin: .45rem 0; padding-left: 1.3rem; }
+.job-list li { margin: .45rem 0; }
+.job-list button { margin-left: .35rem; }
+dialog { width: min(32rem, calc(100% - 2rem)); border: 1px solid var(--border); border-radius: .8rem; padding: 1.1rem; color: var(--ink); }
+dialog::backdrop { background: #102c3e88; }
+:focus-visible { outline: 2px solid #21869d; outline-offset: 3px; }
+@media (max-width: 700px) {
+    .columns, .review-grid, .editor-grid, .file-row, .scale-option { grid-template-columns: 1fr; }
+    .masthead { align-items: flex-start; flex-direction: column; }
+}
