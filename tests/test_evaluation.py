@@ -4,6 +4,7 @@ import json
 import os
 import unittest
 from email.utils import formatdate
+from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
 
@@ -25,6 +26,12 @@ def criterion(criterion_id, weight, *, kind="boolean", section="Качество
 
 def answer(criterion_id, value):
     return {"criterion_id": criterion_id, "answer": value}
+
+
+def starter_identity_checklist():
+    source = Path(__file__).resolve().parents[1] / "app" / "starter_checklist.json"
+    criteria = json.loads(source.read_text(encoding="utf-8"))["criteria"]
+    return {"criteria": [item for item in criteria if item["id"] == "03"]}
 
 
 class ScoringTests(unittest.TestCase):
@@ -118,6 +125,16 @@ class EvaluatorTests(unittest.TestCase):
         payload = {"choices": [{"message": {"content": json.dumps({"answers": answers})}}]}
         opener.return_value.open.return_value = io.BytesIO(json.dumps(payload).encode())
 
+    def strict_answers(self):
+        answers = {
+            item["criterion_id"]: {
+                field: value for field, value in copy.deepcopy(item).items() if field not in {"criterion_id", "omission"}
+            }
+            for item in self.answers
+        }
+        answers["dialogue"]["evidence"] = {"start_id": "m2", "end_id": "m2"}
+        return answers
+
     @patch("app.evaluation.build_opener")
     def test_calls_model_with_current_rubric_and_resolves_original_messages(self, opener):
         self.mock_completion(opener, self.answers)
@@ -142,8 +159,7 @@ class EvaluatorTests(unittest.TestCase):
     @patch("app.evaluation.build_opener")
     def test_strict_mode_constrains_current_criteria_answers_and_evidence(self, opener):
         self.checklist["criteria"][1]["na_condition"] = "Диалог не состоялся."
-        answers = {item["criterion_id"]: item for item in copy.deepcopy(self.answers)}
-        answers["dialogue"]["evidence"] = {"start_id": "m2", "end_id": "m2"}
+        answers = self.strict_answers()
         # Provider object order is irrelevant to the order of the public list.
         self.mock_completion(opener, dict(reversed(list(answers.items()))))
         with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
@@ -162,18 +178,20 @@ class EvaluatorTests(unittest.TestCase):
         self.assertEqual(keyed["required"], ["new-rule", "dialogue"])
         self.assertFalse(keyed["additionalProperties"])
         fields = keyed["properties"]["dialogue"]["properties"]
+        self.assertEqual(set(fields), {"answer", "reason", "evidence"})
         self.assertEqual(fields["answer"]["enum"], [0, 4, 7, 10, "N/A"])
-        self.assertEqual(fields["criterion_id"]["enum"], ["dialogue"])
         self.assertEqual(fields["evidence"]["required"], ["start_id", "end_id"])
         self.assertEqual(fields["evidence"]["properties"]["end_id"]["enum"], ["m1", "m2", "m3"])
+        sent = json.loads(body["messages"][1]["content"])
+        self.assertEqual(list(sent)[0], "criteria")
+        self.assertEqual(sent["transcript"][0], ["m1", "client", "2025-01-01T09:00:00+05:00", "Сәлеметсіз бе"])
 
     @patch("app.evaluation.build_opener")
     def test_strict_mode_validates_object_and_range_even_if_provider_ignores_schema(self, opener):
-        answers = {item["criterion_id"]: item for item in copy.deepcopy(self.answers)}
-        answers["dialogue"]["evidence"] = {"start_id": "m2", "end_id": "m2"}
+        answers = self.strict_answers()
         mutations = [
             (lambda result: result.pop("dialogue"), "Ключи ответов"),
-            (lambda result: result["dialogue"].update(criterion_id="new-rule"), "criterion_id"),
+            (lambda result: result["dialogue"].update(criterion_id="new-rule"), "не соответствуют схеме"),
             (lambda result: result["dialogue"].update(extra=True), "не соответствуют схеме"),
             (lambda result: result["dialogue"].update(evidence={"message_ids": ["m2"]}), "границы"),
             (lambda result: result["dialogue"].update(evidence={"start_id": "m0", "end_id": "m2"}), "репликами"),
@@ -192,6 +210,264 @@ class EvaluatorTests(unittest.TestCase):
             opener.return_value.open.return_value = io.BytesIO(json.dumps(payload).encode())
             with self.assertRaisesRegex(EvaluationError, "повторяющийся ключ"):
                 evaluate(self.conversation, self.checklist)
+
+    @patch("app.evaluation.build_opener")
+    def test_starter_identity_uses_scope_explicit_verification_and_chronology(self, opener):
+        checklist = starter_identity_checklist()
+        confirmations = [
+            ("RU", "Личность клиента подтверждена."),
+            ("KZ", "Клиенттің жеке басы расталды."),
+            ("EN", "Customer identity verified."),
+        ]
+        cases = [
+            (language, "account", "none", None, "m4", "system", text, True)
+            for language, text in confirmations
+        ] + [
+            ("EN", "public", "consent", "m2", None, "bot", "By continuing, you agree to personal data processing.", "N/A"),
+            ("EN", "account", "confirmed", "m2", "m4", "bot", "By continuing, you agree to personal data processing.", False),
+            ("EN", "account", "confirmed", "m2", "m4", "client", "My identity is verified.", False),
+            ("EN", "account", "confirmed", "m2", "m4", "operator", "Do we need your identity verified?", False),
+            ("EN", "account", "confirmed", "m5", "m4", "operator", "We can skip the verification.", False),
+            ("RU", "account", "confirmed", "m2", "m4", "system", "Личность клиента подтверждена? Проверьте статус.", False),
+            ("RU", "account", "confirmed", "m2", "m4", "system", "Личность клиента подтверждена не была.", False),
+            ("EN", "account", "confirmed", "m2", "m4", "system", "Customer identity verification completed unsuccessfully.", False),
+        ]
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            for language, scope, verification, verification_id, protected_id, speaker, detail, expected in cases:
+                with self.subTest(language=language, scope=scope, detail=detail):
+                    conversation = {"language": language, "channel": "agent chat", "transcript": [
+                        {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": "Question."},
+                        {"id": "m2", "timestamp": "00:02", "speaker": speaker, "text": detail},
+                        {"id": "m3", "timestamp": "00:03", "speaker": "client", "text": "Thank you."},
+                        {"id": "m4", "timestamp": "00:04", "speaker": "operator", "text": (
+                            "The account has a restriction." if scope == "account" else "Open the pricing menu."
+                        )},
+                        {"id": "m5", "timestamp": "00:05", "speaker": "system", "text": (
+                            "Customer identity verified." if scope == "account" else "Chat closed."
+                        )},
+                    ]}
+                    self.mock_completion(opener, {"03": {
+                        "scope": scope, "verification": verification, "verification_id": verification_id,
+                        "protected_id": protected_id, "evidence": {"start_id": "m1", "end_id": "m3"},
+                    }})
+                    [result] = evaluate(conversation, checklist)
+                    self.assertEqual(result["answer"], expected)
+                    self.assertEqual(result["criterion_id"], "03")
+                    if expected is True:
+                        self.assertEqual(result["evidence"], {"start_id": "m2", "end_id": "m4"})
+                    elif expected is False:
+                        self.assertEqual(result["evidence"], {"start_id": "m1", "end_id": "m4"})
+
+        body = json.loads(opener.return_value.open.call_args.args[0].data)
+        fields = body["response_format"]["json_schema"]["schema"]["properties"]["answers"]["properties"]["03"]["properties"]
+        self.assertEqual(fields["verification_id"]["enum"], ["m1", "m2", "m3", "m4", "m5", None])
+        self.assertNotIn("answer", fields)
+
+    @patch("app.evaluation.build_opener")
+    def test_deferred_specific_registration_reset_requires_identity(self, opener):
+        checklist = starter_identity_checklist()
+        cases = [
+            ("RU", "Регистрируем его брокерский счёт. Мы зарегистрировались, но вы сможете сбросить нам эти данные?",
+             "Назовите номер телефона, с которого начали регистрацию.", False),
+            ("RU", "Сбросьте регистрацию моего счёта.",
+             "Запрос по регистрации сможем проверить завтра.", False),
+            ("EN", "Could you please reset my account registration?",
+             "We can review that account request next week.", False),
+            ("KZ", "Тіркеуімді жойып бере аласыз ба?",
+             "Тіркеу туралы өтінішіңізді ертең қараймыз.", False),
+            ("RU", "Можете подсказать, как мне сбросить регистрацию моего счёта?",
+             "Откройте настройки регистрации.", "N/A"),
+            ("EN", "How do I reset my account registration myself?",
+             "Open Registration in the app.", "N/A"),
+            ("EN", "Could you delete this message? My account is fine.",
+             "I can't remove chat messages.", "N/A"),
+            ("EN", "Could you delete this message from my account inbox?",
+             "I can't remove chat messages.", "N/A"),
+        ]
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            for language, request, reply, expected in cases:
+                with self.subTest(language=language, request=request):
+                    conversation = {"language": language, "channel": "voice call", "transcript": [
+                        {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": request},
+                        {"id": "m2", "timestamp": "00:02", "speaker": "operator", "text": reply},
+                        {"id": "m3", "timestamp": "00:03", "speaker": "operator", "text": "Goodbye."},
+                    ]}
+                    self.mock_completion(opener, {"03": {
+                        "scope": "public", "verification": "none", "verification_id": None,
+                        "protected_id": None, "evidence": {"start_id": "m3", "end_id": "m3"},
+                    }})
+                    [result] = evaluate(conversation, checklist)
+                    self.assertEqual(result["answer"], expected)
+                    if expected is False:
+                        self.assertEqual(result["evidence"], {"start_id": "m1", "end_id": "m2"})
+
+    @patch("app.evaluation.build_opener")
+    def test_actual_account_restriction_overrides_public_facts_but_conditionals_do_not(self, opener):
+        checklist = starter_identity_checklist()
+        cases = [
+            ("RU", "operator", "Я посмотрел: на вашем счёте есть ограничение на вывод.", False),
+            ("KZ", "operator", "Сіздің шотыңызда ақша шығаруға шектеу қойылғанын көріп тұрмын.", False),
+            ("EN", "operator", "Hi, I'm Tyler. I can see a withdrawal restriction on your account.", False),
+            ("RU", "operator", "Если на вашем счёте есть ограничение на вывод, проверьте уведомления.", "N/A"),
+            ("KZ", "operator", "Сіздің шотыңызда ақша шығаруға шектеу қойылған болса, хабарламаны қараңыз.", "N/A"),
+            ("EN", "operator", "Is there a withdrawal restriction on your account? Check the Settings menu.", "N/A"),
+            ("EN", "operator", "You said there is a withdrawal restriction on your account.", "N/A"),
+            ("EN", "client", "There is a withdrawal restriction on your account.", "N/A"),
+        ]
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            for language, speaker, text, expected in cases:
+                with self.subTest(language=language, text=text):
+                    conversation = {"language": language, "channel": "agent chat", "transcript": [
+                        {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": "Where are account settings?"},
+                        {"id": "m2", "timestamp": "00:02", "speaker": speaker, "text": text},
+                    ]}
+                    self.mock_completion(opener, {"03": {
+                        "scope": "public", "verification": "none", "verification_id": None,
+                        "protected_id": None, "evidence": {"start_id": "m1", "end_id": "m1"},
+                    }})
+                    [result] = evaluate(conversation, checklist)
+                    self.assertEqual(result["answer"], expected)
+                    if expected is False:
+                        self.assertEqual(result["evidence"], {"start_id": "m1", "end_id": "m2"})
+
+    @patch("app.evaluation.build_opener")
+    def test_private_paid_offer_does_not_make_generic_instrument_navigation_protected(self, opener):
+        checklist = starter_identity_checklist()
+        conversation = {"language": "EN", "channel": "agent chat", "transcript": [
+            {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": "How do I find bonds in the app?"},
+            {"id": "m2", "timestamp": "00:02", "speaker": "operator", "text": "Open Quotes and search by ticker."},
+            {"id": "m3", "timestamp": "00:03", "speaker": "operator", "text": (
+                "Send me your personal number and I'll call you after work. I charge for private advice."
+            )},
+        ]}
+        facts = {
+            "scope": "account", "verification": "none", "verification_id": None,
+            "protected_id": "m3", "evidence": {"start_id": "m3", "end_id": "m3"},
+        }
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            for protected_id in ("m3", None):
+                self.mock_completion(opener, {"03": {**facts, "protected_id": protected_id}})
+                [result] = evaluate(conversation, checklist)
+                self.assertEqual(result["answer"], "N/A")
+                self.assertEqual(result["evidence"], {"start_id": "m1", "end_id": "m1"})
+
+            self.mock_completion(opener, {"03": {**facts, "scope": "public", "protected_id": "m2"}})
+            [result] = evaluate(conversation, checklist)
+            self.assertEqual(result["answer"], "N/A")
+            self.assertEqual(result["evidence"], {"start_id": "m1", "end_id": "m1"})
+
+            conversation["transcript"].append({
+                "id": "m4", "timestamp": "00:04", "speaker": "client",
+                "text": "Could you also check why my transfer is missing?",
+            })
+            self.mock_completion(opener, {"03": facts})
+            [result] = evaluate(conversation, checklist)
+            self.assertIs(result["answer"], False)
+
+    @patch("app.evaluation.build_opener")
+    def test_individual_handoff_uses_operator_action_after_verification(self, opener):
+        checklist = starter_identity_checklist()
+        cases = [
+            ("RU", "Я перевёл деньги, но они не поступили.", "Личность клиента подтверждена.",
+             "Я передал обращение по вашему переводу специалистам."),
+            ("KZ", "Шотыма ақша аудардым, әлі көрінбей тұр.", "Клиенттің жеке басы расталды.",
+             "Аударым туралы сұрағыңызды тексеруге жолдаймын."),
+            ("EN", "My transfer is missing.", "Customer identity verified.",
+             "I have submitted your case for review."),
+        ]
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            for language, issue, verified, handoff in cases:
+                for scope, claimed_protected_id in (("public", None), ("account", "m2")):
+                    with self.subTest(language=language, scope=scope):
+                        conversation = {"language": language, "channel": "agent chat", "transcript": [
+                            {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": issue},
+                            {"id": "m2", "timestamp": "00:02", "speaker": "system", "text": verified},
+                            {"id": "m3", "timestamp": "00:03", "speaker": "operator", "text": handoff},
+                        ]}
+                        self.mock_completion(opener, {"03": {
+                            "scope": scope, "verification": "none", "verification_id": None,
+                            "protected_id": claimed_protected_id, "evidence": {"start_id": "m1", "end_id": "m2"},
+                        }})
+                        [result] = evaluate(conversation, checklist)
+                        self.assertIs(result["answer"], True)
+                        self.assertEqual(result["evidence"], {"start_id": "m2", "end_id": "m3"})
+
+    @patch("app.evaluation.build_opener")
+    def test_late_verification_does_not_validate_individual_handoff_or_change_public_scope(self, opener):
+        checklist = starter_identity_checklist()
+        conversation = {"language": "EN", "channel": "agent chat", "transcript": [
+            {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": "My transfer is missing."},
+            {"id": "m2", "timestamp": "00:02", "speaker": "operator", "text": "I've sent the case for review."},
+            {"id": "m3", "timestamp": "00:03", "speaker": "system", "text": "Customer identity verified."},
+        ]}
+        facts = {
+            "scope": "public", "verification": "confirmed", "verification_id": "m3",
+            "protected_id": "m3", "evidence": {"start_id": "m1", "end_id": "m1"},
+        }
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            self.mock_completion(opener, {"03": facts})
+            [result] = evaluate(conversation, checklist)
+            self.assertIs(result["answer"], False)
+            self.assertEqual(result["evidence"], {"start_id": "m1", "end_id": "m2"})
+
+            conversation["transcript"][0]["text"] = "Where do I check my transfer status in the app?"
+            conversation["transcript"][1]["text"] = "Customer identity verified."
+            conversation["transcript"][1]["speaker"] = "system"
+            conversation["transcript"][2]["text"] = "I've sent the case for review."
+            conversation["transcript"][2]["speaker"] = "operator"
+            self.mock_completion(opener, {"03": {**facts, "verification_id": "m2", "protected_id": "m3"}})
+            [result] = evaluate(conversation, checklist)
+            self.assertEqual(result["answer"], "N/A")
+
+    @patch("app.evaluation.build_opener")
+    def test_public_identity_cites_substantive_exchange_instead_of_closing(self, opener):
+        checklist = starter_identity_checklist()
+        cases = [
+            ("EN", "Settings where? There's no login on the company site.",
+             "Go to the trading site and sign in there.", "Thank you for your help.",
+             "We appreciate you using our service. Good bye for now."),
+            ("KZ", "Профильде ондай бөлім жоқ қой.",
+             "Мәзір → Поручения → Персональные данные.", "Иә, рақмет", "Жақсы."),
+            ("RU", "Какую кнопку нажать для реквизитов?", "Всё есть в приложении.",
+             "Спасибо за помощь.", "До свидания."),
+        ]
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            for language, question, guidance, thanks, closing in cases:
+                with self.subTest(language=language):
+                    conversation = {"language": language, "channel": "agent chat", "transcript": [
+                        {"id": "m1", "timestamp": "00:00", "speaker": "client", "text": "Where are settings?"},
+                        {"id": "m2", "timestamp": "00:01", "speaker": "operator", "text": "Open the app."},
+                        {"id": "m3", "timestamp": "00:02", "speaker": "client", "text": question},
+                        {"id": "m4", "timestamp": "00:03", "speaker": "operator", "text": guidance},
+                        {"id": "m5", "timestamp": "00:04", "speaker": "client", "text": thanks},
+                        {"id": "m6", "timestamp": "00:05", "speaker": "operator", "text": closing},
+                    ]}
+                    facts = {
+                        "scope": "public", "verification": "none", "verification_id": None,
+                        "protected_id": None, "evidence": {"start_id": "m6", "end_id": "m6"},
+                    }
+                    self.mock_completion(opener, {"03": facts})
+                    [result] = evaluate(conversation, checklist)
+                    self.assertEqual(result["answer"], "N/A")
+                    self.assertEqual(result["evidence"], {"start_id": "m3", "end_id": "m4"})
+
+                    original_exchange = {"start_id": "m1", "end_id": "m2"}
+                    self.mock_completion(opener, {"03": {**facts, "evidence": original_exchange}})
+                    [result] = evaluate(conversation, checklist)
+                    self.assertEqual(result["evidence"], original_exchange)
+
+    @patch("app.evaluation.build_opener")
+    def test_replaced_id_03_rule_is_evaluated_generically(self, opener):
+        new_rule = criterion("03", 20, na_condition="Условие для пользовательского правила.")
+        self.mock_completion(opener, {"03": {
+            "answer": True, "reason": "Выполнено пользовательское правило.", "evidence": {"start_id": "m2", "end_id": "m2"},
+        }})
+        with patch.dict(os.environ, {"CQA_LLM_RESPONSE_FORMAT": "json_schema"}):
+            [result] = evaluate(self.conversation, {"criteria": [new_rule]})
+        self.assertTrue(result["answer"])
+        self.assertEqual(result["reason"], "Выполнено пользовательское правило.")
+        body = json.loads(opener.return_value.open.call_args.args[0].data)
+        self.assertNotIn("scope=public", body["messages"][0]["content"])
 
     @patch("app.evaluation.build_opener")
     def test_rejects_incomplete_invalid_or_ungrounded_answers(self, opener):

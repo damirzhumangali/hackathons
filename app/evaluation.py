@@ -1,11 +1,13 @@
 import json
 import math
 import os
+import re
 import time
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from fractions import Fraction
 from http.client import HTTPException
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -186,16 +188,285 @@ _JSON_OBJECT_INSTRUCTIONS = """\
 """
 
 _JSON_SCHEMA_INSTRUCTIONS = """\
-Верни JSON-объект answers, внутри которого ключи — ID всех критериев из чек-листа. В каждом
-ответе criterion_id совпадает с его ключом. Поле answer — JSON true/false для boolean/flag,
-разрешённое целое число для scale либо строка "N/A" при неприменимости. Обоснуй ответ одним
-коротким предложением. Если нужное действие пропущено, поставь omission: true, иначе false.
-Доказательство всегда диапазон evidence с start_id и end_id. Для одной подтверждающей
-реплики поставь один и тот же ID в обеих границах. Для пропуска укажи участок, где действие
-ожидалось. Сначала идёт начальная реплика, затем конечная. Не придумывай цитаты и баллы.
+Транскрипт состоит из строк [ID, роль, время, текст]. Верни JSON-объект answers с ключами ID
+всех критериев. Поле answer — true/false для boolean/flag, допустимое целое для scale или
+"N/A" при неприменимости. reason — одно короткое предложение. Доказательство — диапазон
+evidence с start_id и end_id в порядке диалога. Для одной реплики повтори ID в обеих границах.
+Для пропуска укажи участок, где действие ожидалось. Не придумывай цитаты и баллы.
 """
 
-_ANSWER_FIELDS = {"criterion_id", "answer", "reason", "evidence", "omission"}
+_IDENTITY_INSTRUCTIONS = """\
+Для 03 верни факты вместо answer/reason. scope=public для общей информации и инструкций,
+даже когда клиент говорит «мой тариф» или «мой отчёт», если он только спрашивает, где их
+посмотреть. scope=account для проверки конкретного счёта, перевода, позиции или операции.
+Просьба сбросить регистрацию, удалить или изменить конкретную учётную запись также относится
+к scope=account, даже если оператор отложил действие или не смог его выполнить.
+Примеры public: где открыть тариф; Деректерді жаңарту мәзірі қайда?; where is Use Margin?
+Примеры account: проверьте мой перевод; менің шотымда неге ақша шығару жабық?; check my balance.
+protected_id — первое сообщение оператора/системы с раскрытием сведений конкретного счёта,
+защищённым действием или подтверждением передачи конкретного обращения на проверку.
+Фактическая передача конкретного платежа или позиции на проверку — защищённое действие.
+Само подтверждение личности относится только к verification_id, а не к protected_id.
+Вопрос клиента, общая инструкция и предложение начать проверку — не protected_id. Если
+оператор прямо сообщает о действующем ограничении на вывод на счёте клиента, это раскрытие.
+Гипотетическое ограничение и инструкция, где его проверить, раскрытием не являются. Если
+оператор предлагает частную платную консультацию, это нарушение 08, но само предложение
+не делает исходный общий запрос клиента защищённым. Если защищённого действия не было,
+protected_id=null. verification=confirmed и verification_id=ID
+только при явном подтверждении успешной проверки личности (личность клиента подтверждена;
+клиенттің жеке басы расталды; customer identity verified). Просьба проверить = requested,
+согласие на проверку или обработку данных = consent, заявление клиента = claimed,
+отсутствие проверки = none. Для них verification_id=null. Успех после protected_id не
+считается проверкой до действия. Обычный переход от бота к оператору ничего не подтверждает.
+Для scope=public укажи в evidence сам запрос и реплику с общей информацией или инструкцией.
+Если клиент уточнил запрос, укажи уточнение и ответ на него. Не ссылайся на приветствие,
+служебное уведомление, благодарность или прощание вместо этих реплик.
+"""
+
+_STARTER_CHECKLIST_PATH = Path(__file__).with_name("starter_checklist.json")
+_STARTER_IDENTITY = next(
+    criterion
+    for criterion in json.loads(_STARTER_CHECKLIST_PATH.read_text(encoding="utf-8"))["criteria"]
+    if criterion["id"] == "03"
+)
+_VERIFICATION_STATES = ["confirmed", "consent", "requested", "claimed", "none"]
+_IDENTITY_FIELDS = {"scope", "verification", "verification_id", "protected_id", "evidence"}
+_ANSWER_FIELDS = {"answer", "reason", "evidence"}
+_VERIFIED_IDENTITY = re.compile(
+    r"личность(?: клиента| пользователя)? (?:успешно )?(?:подтверждена|проверена|установлена)\b"
+    r"|идентификаци[яию] (?:успешно )?(?:пройдена|проведена|завершена|подтверждена)\b"
+    r"|жеке бас(?:ыңыз|ы)? (?:сәтті )?(?:расталды|тексерілді|сәйкестендірілді)\b"
+    r"|identity (?:has been |was |is )?(?:successfully )?(?:verified|confirmed|authenticated)\b"
+    r"|identity verification (?:completed|succeeded|successful|complete)\b"
+    r"|(?:i have |we have |i |we )(?:successfully )?verified your identity\b",
+    re.IGNORECASE,
+)
+_ACCOUNT_RESTRICTION = re.compile(
+    r"\bна вашем сч[её]те (?:сейчас |уже )?(?:есть|действует|установлено|введено) "
+    r"ограничение на вывод\b"
+    r"|\b(?:сіздің )?шотыңызда (?:қазір )?(?:ақша|қаражат) шығаруға шектеу "
+    r"(?:қойылған(?:ын)?|қойылды|бар)\b"
+    r"|\b(?:i can see|there is) (?:a |an active )withdrawal restriction on your account\b"
+    r"|\byour account (?:currently )?has (?:a |an active )withdrawal restriction\b"
+    r"|\bwithdrawals are (?:currently )?(?:blocked|restricted) on your account\b",
+    re.IGNORECASE,
+)
+_INDIVIDUAL_ACCOUNT_ISSUE = re.compile(
+    r"\b(?:пополнил[аи]?|пополнял[аи]?|перев[её]л[аи]?|отправил[аи]?)\b[^.!?;]{0,75}"
+    r"\b(?:денег[^.!?;]{0,20}нет|не поступил\w*|не приш[её]л\w*|не отобразил\w*)\b"
+    r"|\bв (?:мо[её]м )?портфеле не вижу\b"
+    r"|\bшот(?:қа|ыма) ақша аудардым\b[^.!?;]{0,45}\b(?:көрінбей|түспеді)\b"
+    r"|\bi (?:sent|made|submitted) (?:money|(?:an?|my|the) (?:transfer|payment|deposit|order))\b"
+    r"[^.!?;]{0,75}\b(?:missing|not received|hasn['’]t shown up|didn['’]t arrive|failed|rejected)\b"
+    r"|\bmy (?:transfer|deposit|payment|withdrawal|position|order) (?:is |was |has )?"
+    r"(?:missing|failed|rejected|blocked|not received)\b",
+    re.IGNORECASE,
+)
+_INDIVIDUAL_ACCOUNT_HANDOFF = re.compile(
+    r"\b(?:передал[аи]?|направил[аи]?|передам|направлю) (?:специалистам )?"
+    r"(?:вопрос|обращение|заявку) (?:по зачислени\w*|по вашему перевод\w*|об отображении (?:вашей )?позици\w*)\b"
+    r"|\b(?:вопрос|обращение|заявка) (?:о позици\w*|по зачислени\w*|по вашему перевод\w*) "
+    r"(?:передан[ао]?|направлен[ао]?)\b"
+    r"|\b(?:төлем|аударым) туралы сұрағыңызды (?:мамандарға|тексеруге) "
+    r"(?:жолдаймын|жолдадым|жібердім|жіберемін)\b"
+    r"|\b(?:i['’]ve|i have|i) (?:sent|submitted|escalated|forwarded) "
+    r"(?:(?:the|your) (?:case|request|ticket)|your (?:transfer|deposit|payment|order)) "
+    r"(?:for (?:a )?review|to (?:the|our) (?:team|specialists))\b",
+    re.IGNORECASE,
+)
+_PRIVATE_ADVICE = re.compile(
+    r"\b(?:частн\w*|личн\w* номер|после работы|private advice|after work|personal number|жұмыстан кейін|жеке нөмір\w*)\b",
+    re.IGNORECASE,
+)
+_PAID_ADVICE = re.compile(
+    r"\b(?:платн\w*|за плату|i charge|for a fee|paid (?:advice|consultation)|ақылы)\b",
+    re.IGNORECASE,
+)
+_INSTRUMENT_NAVIGATION = re.compile(
+    r"\b(?:как|где) (?:найти|посмотреть|искать) (?:облигаци\w*|акци\w*|бумаг\w*)\b"
+    r"|\b(?:how|where)\b[^.!?\r\n]{0,60}\b(?:find|search for|look for) (?:bonds|stocks|securities)\b"
+    r"|\b(?:облигация\w*|акция\w*|бағалы қағаз\w*)\b[^.!?\r\n]{0,50}\b(?:қайдан|қалай)\b",
+    re.IGNORECASE,
+)
+_PERSONAL_ACCOUNT = re.compile(
+    r"\b(?:my|your) (?:account|balance|transfer|deposit|withdrawal|portfolio|position|order|funds|holdings)\b"
+    r"|\b(?:мой|моя|мо[еиё]|мо[её]м|моего|ваш|ваша|ваш[еиё]|вашем|вашего) "
+    r"(?:сч[её]т|баланс|перевод|вклад|портфел|позиц|заявк|вывод)\w*\b"
+    r"|\b(?:шотыңыз\w*|шотым\w*|аударымым\w*|балансым\w*|өтінімім\w*|портфелім\w*)\b",
+    re.IGNORECASE,
+)
+_PUBLIC_GUIDANCE = re.compile(
+    r"\b(?:open|go to|sign in|log in|click|tap|select|choose|look under)\b"
+    r"|\b(?:откройте|перейдите|зайдите|войдите|нажмите|выберите|доступен через)\b"
+    r"|\b(?:кіріңіз|таңдаңыз|басыңыз|қараңыз|өтіңіз)\b|→",
+    re.IGNORECASE,
+)
+_COURTESY = re.compile(
+    r"(?:yes(?: please)?|no|ok(?:ay)?|got it|that worked|"
+    r"(?:thanks|thank you)(?: very much| for (?:your (?:help|time|patience)|contacting us))?|"
+    r"you['’]re welcome|we appreciate (?:you using our service|your (?:time|patience))|"
+    r"hi|hello|good (?:morning|afternoon|evening)|(?:good ?)?bye(?: for now)?|have a (?:good|nice) day|"
+    r"anything else(?: i can help (?:you )?with)?|"
+    r"да|нет|хорошо|понятно|ясно|спасибо(?: большое| за (?:помощь|ответ|обращение))?|"
+    r"благодарю|пожалуйста|здравствуйте|"
+    r"добрый (?:день|вечер)|доброе утро|до свидания|всего доброго|хорошего дня|"
+    r"иә|жоқ|қосыңызшы|(?:рақмет|рахмет)(?: сізге)?|жақсы|түсінікті|сәлеметсіз бе|сау болыңыз|қайырлы күн)",
+    re.IGNORECASE,
+)
+_RU_ACCOUNT_CHANGE_TARGET = (
+    r"\b(?:мой|мою|моего|его|е[её]|свой|свою|своего|наш[ау]?) (?:брокерск\w* )?"
+    r"(?:сч[её]т|аккаунт|профил|регистраци)\w*\b"
+)
+_ACCOUNT_CHANGE_REQUEST = re.compile(
+    r"\b(?:(?:можете|сможете|могли бы)(?: ли)?(?: вы)? (?:сбросить|удалить|аннулировать)"
+    rf"|сбросьте|удалите|аннулируйте) (?:нам |мне )?(?:регистрацию )?{_RU_ACCOUNT_CHANGE_TARGET}"
+    r"|\b(?:(?:can|could|would) you (?:please )?|please )(?:reset|delete|remove) "
+    r"(?:the registration (?:for|of) )?(?:my|our|his|her) (?:brokerage )?(?:account|profile|registration)\b"
+    r"|\b(?:шотымды|профилімді|тіркеуімді) (?:жойып|өшіріп|қалпына келтіріп) "
+    r"(?:беріңіз|бере аласыз ба)\b",
+    re.IGNORECASE,
+)
+_REFERENCED_REGISTRATION_RESET = re.compile(
+    rf"{_RU_ACCOUNT_CHANGE_TARGET}.*\bзарегистрировал(?:ся|ась|ись)\b[^.!?;]*"
+    r"\b(?:можете|сможете) сбросить (?:нам|мне) (?:эти данные|приложение настройки|настройки приложения)\b",
+    re.IGNORECASE,
+)
+_REGISTRATION_CONTACT_REPLY = re.compile(
+    r"\bномер телефона\b[^.!?;]*\b(?:регистраци\w*|зарегистрир\w*)\b",
+    re.IGNORECASE,
+)
+_ACCOUNT_CHANGE_REPLY = re.compile(
+    r"\b(?:регистраци\w*|зарегистрир\w*|сч[её]т\w*|аккаунт\w*|registration|registered|"
+    r"account|profile|тіркеу\w*|тіркел\w*|шот\w*)\b",
+    re.IGNORECASE,
+)
+_SENTENCE = re.compile(r"[^.!?;\r\n]+[.!?;]?")
+_HYPOTHETICAL = re.compile(
+    r"\b(?:если|когда|например|возможно|может|проверю|есть ли|вы (?:пишете|говорите|сообщили)|"
+    r"if|whether|when|might|could|may|would|suppose|example|you (?:said|reported|mentioned)|"
+    r"егер|болса|мүмкін|қойылса|жаздыңыз|айтуынша)\b",
+    re.IGNORECASE,
+)
+_NEGATED = re.compile(
+    r"\b(?:не|нет|not|never|no|failed|failure|unsuccessful(?:ly)?|pending|unverified|"
+    r"сәтсіз|емес|жоқ|расталмады|тексерілмеді)\b",
+    re.IGNORECASE,
+)
+
+
+def _states_fact(text: str, pattern: re.Pattern[str]) -> bool:
+    return any(
+        pattern.search(sentence)
+        and not sentence.endswith("?")
+        and not _HYPOTHETICAL.search(sentence)
+        and not _NEGATED.search(sentence)
+        for sentence in _SENTENCE.findall(text)
+    )
+
+
+def _observed_protected_id(transcript: list[dict]) -> str | None:
+    individual_issue = False
+    for message in transcript:
+        text = message["text"]
+        if message["speaker"] == "client":
+            individual_issue = individual_issue or any(
+                _INDIVIDUAL_ACCOUNT_ISSUE.search(sentence) and not _HYPOTHETICAL.search(sentence)
+                for sentence in _SENTENCE.findall(text)
+            )
+        elif message["speaker"] == "operator" and (
+            _states_fact(text, _ACCOUNT_RESTRICTION)
+            or (individual_issue and _states_fact(text, _INDIVIDUAL_ACCOUNT_HANDOFF))
+        ):
+            return message["id"]
+    return None
+
+
+def _is_paid_private_offer(message: dict) -> bool:
+    return (
+        message["speaker"] == "operator"
+        and bool(_PRIVATE_ADVICE.search(message["text"]))
+        and bool(_PAID_ADVICE.search(message["text"]))
+    )
+
+
+def _public_instrument_request_id(transcript: list[dict]) -> str | None:
+    if any(
+        message["speaker"] in {"client", "operator"} and _PERSONAL_ACCOUNT.search(message["text"])
+        for message in transcript
+    ):
+        return None
+    return next((
+        message["id"] for message in transcript
+        if message["speaker"] == "client" and _INSTRUMENT_NAVIGATION.search(message["text"])
+    ), None)
+
+
+def _public_identity_evidence(transcript: list[dict], positions: dict[str, int], evidence: dict) -> dict:
+    cited = []
+    request = None
+    exchange = None
+    has_guidance = False
+    last_content = None
+    start, end = positions[evidence["start_id"]], positions[evidence["end_id"]]
+    for index, message in enumerate(transcript):
+        speaker = message["speaker"]
+        if speaker not in {"client", "operator"} or _is_paid_private_offer(message):
+            continue
+        parts = [part.strip() for part in re.split(r"[.,!?…\r\n]+", message["text"]) if part.strip()]
+        if all(_COURTESY.fullmatch(part) for part in parts):
+            continue
+
+        last_content = message["id"]
+        if start <= index <= end:
+            cited.append(message)
+        if speaker == "client":
+            request = last_content
+        elif request is not None:
+            exchange = {"start_id": request, "end_id": last_content}
+            has_guidance = bool(_PUBLIC_GUIDANCE.search(message["text"]))
+
+    cited_request = next((message["id"] for message in cited if message["speaker"] == "client"), None)
+    cited_reply = next((message["id"] for message in reversed(cited) if message["speaker"] == "operator"), None)
+    if cited_request and cited_reply and positions[cited_request] < positions[cited_reply]:
+        return {"start_id": cited_request, "end_id": cited_reply}
+    if exchange and (has_guidance or not cited):
+        return exchange
+    if cited:
+        return {"start_id": cited[0]["id"], "end_id": cited[-1]["id"]}
+    if last_content is not None:
+        return {"start_id": last_content, "end_id": last_content}
+    return evidence
+
+
+def _account_change_evidence(transcript: list[dict]) -> dict | None:
+    for index, message in enumerate(transcript):
+        if message["speaker"] != "client":
+            continue
+        text = " ".join(message["text"].split())
+        direct_request = any(
+            _ACCOUNT_CHANGE_REQUEST.search(sentence)
+            and not _HYPOTHETICAL.search(_ACCOUNT_CHANGE_REQUEST.sub("", sentence))
+            and not _NEGATED.search(sentence)
+            for sentence in _SENTENCE.findall(text)
+        )
+        if not direct_request and not _REFERENCED_REGISTRATION_RESET.search(text):
+            continue
+        replies = transcript[index + 1:] if direct_request else transcript[index + 1 : index + 3]
+        reply_pattern = _ACCOUNT_CHANGE_REPLY if direct_request else _REGISTRATION_CONTACT_REPLY
+        reply = next((
+            response["id"] for response in replies
+            if response["speaker"] == "operator" and reply_pattern.search(response["text"])
+        ), None)
+        if direct_request or reply is not None:
+            return {"start_id": message["id"], "end_id": reply or message["id"]}
+    return None
+
+
+def _is_starter_identity(criterion: dict) -> bool:
+    return all(
+        criterion.get(field) == _STARTER_IDENTITY[field]
+        for field in ("id", "kind", "description", "na_condition")
+    )
 
 
 def _required_object(properties: dict) -> dict:
@@ -208,11 +479,22 @@ def _required_object(properties: dict) -> dict:
 
 
 def _schema_response_format(conversation: dict, checklist: dict) -> dict:
-    message_id = {"type": "string", "enum": [message["id"] for message in conversation["transcript"]]}
+    ids = [message["id"] for message in conversation["transcript"]]
+    message_id = {"type": "string", "enum": ids}
+    optional_id = {"enum": [*ids, None]}
     evidence = _required_object({"start_id": message_id, "end_id": message_id})
     criteria = {}
     for criterion in checklist["criteria"]:
         criterion_id = criterion["id"]
+        if _is_starter_identity(criterion):
+            criteria[criterion_id] = _required_object({
+                "scope": {"enum": ["public", "account"]},
+                "verification": {"enum": _VERIFICATION_STATES},
+                "verification_id": optional_id,
+                "protected_id": optional_id,
+                "evidence": evidence,
+            })
+            continue
         if criterion["kind"] == "scale":
             values = [option["value"] for option in criterion["options"]]
             answer = {"enum": [*values, "N/A"]} if criterion.get("na_condition") else {"enum": values}
@@ -221,11 +503,9 @@ def _schema_response_format(conversation: dict, checklist: dict) -> dict:
         else:
             answer = {"type": "boolean"}
         criteria[criterion_id] = _required_object({
-            "criterion_id": {"type": "string", "enum": [criterion_id]},
             "answer": answer,
             "reason": {"type": "string"},
             "evidence": evidence,
-            "omission": {"type": "boolean"},
         })
     return {
         "type": "json_schema",
@@ -244,20 +524,105 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
     return result
 
 
-def _strict_answers(result: object, checklist: dict) -> list[dict]:
+def _identity_answer(item: dict, conversation: dict) -> dict:
+    transcript = conversation["transcript"]
+    positions = {message["id"]: index for index, message in enumerate(transcript)}
+    if item["scope"] not in ("public", "account") or item["verification"] not in _VERIFICATION_STATES:
+        raise ValueError("Недопустимый факт об идентификации.")
+    for field in ("verification_id", "protected_id"):
+        value = item[field]
+        if value is not None and (not isinstance(value, str) or value not in positions):
+            raise ValueError("Факты об идентификации должны ссылаться на реплики этого диалога.")
+
+    scope = item["scope"]
+    protected = item["protected_id"]
+    if protected is not None:
+        protected_message = transcript[positions[protected]]
+        if protected_message["speaker"] not in {"operator", "system"} or _states_fact(
+            protected_message["text"], _VERIFIED_IDENTITY
+        ):
+            protected = None
+    evidence = item["evidence"]
+    if protected is None or scope == "public":
+        cited_messages = transcript[positions[evidence["start_id"]] : positions[evidence["end_id"]] + 1]
+        cites_private_offer = any(_is_paid_private_offer(message) for message in cited_messages)
+    else:
+        cites_private_offer = _is_paid_private_offer(transcript[positions[protected]])
+    public_request = _public_instrument_request_id(transcript) if cites_private_offer else None
+    if cites_private_offer:
+        protected = None
+        if public_request is not None:
+            scope = "public"
+            evidence = {"start_id": public_request, "end_id": public_request}
+    if scope == "public":
+        protected = None
+    observed = _observed_protected_id(transcript)
+    if observed is not None and (protected is None or positions[observed] < positions[protected]):
+        protected = observed
+    account_change = _account_change_evidence(transcript)
+    if account_change is not None:
+        scope = "account"
+        evidence = account_change
+    if scope == "public" and protected is None:
+        if public_request is None:
+            evidence = _public_identity_evidence(transcript, positions, evidence)
+        return {
+            "answer": "N/A",
+            "reason": "В диалоге нет запроса, требующего идентификации.",
+            "evidence": evidence,
+        }
+
+    verification_id = item["verification_id"] if item["verification"] == "confirmed" else None
+    confirmed = [
+        message["id"] for message in transcript
+        if (message["speaker"] == "system" or (message["id"] == verification_id and message["speaker"] != "client"))
+        and _states_fact(message["text"], _VERIFIED_IDENTITY)
+    ]
+    for verified in confirmed:
+        if protected is None or positions[verified] < positions[protected]:
+            reason = (
+                "Личность клиента была подтверждена до защищённого действия."
+                if protected else "В диалоге подтверждена проверка личности по запросу о конкретном счёте."
+            )
+            start, end = verified, protected or verified
+            if protected is None and account_change is not None:
+                start, end = sorted((account_change["start_id"], verified), key=positions.__getitem__)
+            return {
+                "answer": True,
+                "reason": reason,
+                "evidence": {"start_id": start, "end_id": end},
+            }
+
+    if protected is not None:
+        anchors = sorted((evidence["start_id"], protected, evidence["end_id"]), key=positions.__getitem__)
+        evidence = {"start_id": anchors[0], "end_id": anchors[-1]}
+        reason = "До раскрытия сведений или защищённого действия проверка личности не подтверждена."
+    else:
+        reason = "Запрос требовал идентификации, но её проведение не подтверждено."
+    return {"answer": False, "reason": reason, "evidence": evidence}
+
+
+def _strict_answers(result: object, checklist: dict, conversation: dict) -> list[dict]:
     if not isinstance(result, dict) or result.keys() != {"answers"}:
         raise ValueError("JSON-ответ должен содержать только поле answers.")
     answers = result["answers"]
-    criterion_ids = {criterion["id"] for criterion in checklist["criteria"]}
-    if not isinstance(answers, dict) or answers.keys() != criterion_ids:
+    criteria = {criterion["id"]: criterion for criterion in checklist["criteria"]}
+    if not isinstance(answers, dict) or answers.keys() != criteria.keys():
         raise ValueError("Ключи ответов должны совпадать с ID критериев чек-листа.")
+    parsed = []
     for criterion_id, item in answers.items():
-        if not isinstance(item, dict) or item.keys() != _ANSWER_FIELDS or item["criterion_id"] != criterion_id:
-            raise ValueError("Поля ответа или его criterion_id не соответствуют схеме.")
+        identity = _is_starter_identity(criteria[criterion_id])
+        expected_fields = _IDENTITY_FIELDS if identity else _ANSWER_FIELDS
+        if not isinstance(item, dict) or item.keys() != expected_fields:
+            raise ValueError("Поля ответа не соответствуют схеме.")
         evidence = item["evidence"]
         if not isinstance(evidence, dict) or evidence.keys() != {"start_id", "end_id"}:
             raise ValueError("Укажите границы проверенного участка диалога.")
-    return list(answers.values())
+        if identity:
+            resolve_evidence(conversation, evidence)
+            item = _identity_answer(item, conversation)
+        parsed.append({"criterion_id": criterion_id, **item})
+    return parsed
 
 
 class _NoRedirects(HTTPRedirectHandler):
@@ -319,18 +684,34 @@ def _request_model(conversation: dict, checklist: dict, *, strict: bool = False)
     except ValueError as error:
         raise EvaluationError("CQA_LLM_TIMEOUT должен быть положительным числом секунд.") from error
 
-    model_input = {
-        "language": conversation["language"],
-        "channel": conversation["channel"],
-        "transcript": conversation["transcript"],
-        "criteria": checklist["criteria"],
-    }
-    instructions = _JSON_SCHEMA_INSTRUCTIONS if strict else _JSON_OBJECT_INSTRUCTIONS
+    if strict:
+        model_input = {
+            "criteria": checklist["criteria"],
+            "language": conversation["language"],
+            "channel": conversation["channel"],
+            "transcript": [
+                [message["id"], message["speaker"], message["timestamp"], message["text"]]
+                for message in conversation["transcript"]
+            ],
+        }
+        instructions = _JSON_SCHEMA_INSTRUCTIONS
+        if any(_is_starter_identity(criterion) for criterion in checklist["criteria"]):
+            instructions += _IDENTITY_INSTRUCTIONS
+        user_content = json.dumps(model_input, ensure_ascii=False, separators=(",", ":"))
+    else:
+        model_input = {
+            "language": conversation["language"],
+            "channel": conversation["channel"],
+            "transcript": conversation["transcript"],
+            "criteria": checklist["criteria"],
+        }
+        instructions = _JSON_OBJECT_INSTRUCTIONS
+        user_content = json.dumps(model_input, ensure_ascii=False)
     body = {
         "model": model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT + instructions},
-            {"role": "user", "content": json.dumps(model_input, ensure_ascii=False)},
+            {"role": "user", "content": user_content},
         ],
         "response_format": {"type": "json_object"},
     }
@@ -384,7 +765,7 @@ def evaluate(conversation: dict, checklist: dict) -> list[dict]:
     try:
         result = json.loads(content, object_pairs_hook=_unique_object if strict else None)
         if strict:
-            answers = _strict_answers(result, checklist)
+            answers = _strict_answers(result, checklist, conversation)
         else:
             answers = result.get("answers") if isinstance(result, dict) else None
         by_id = _answers_by_id(checklist, answers)
@@ -400,12 +781,13 @@ def evaluate(conversation: dict, checklist: dict) -> list[dict]:
                 raise ValueError("Обоснование содержит недопустимые символы Unicode.") from error
             evidence = item.get("evidence")
             resolve_evidence(conversation, evidence)
-            omission = item.get("omission")
-            if type(omission) is not bool:
-                raise ValueError("Признак пропущенного действия omission должен быть логическим.")
-            requires_range = omission or (criterion["kind"] == "boolean" and item["answer"] is False)
-            if requires_range and "start_id" not in evidence:
-                raise ValueError("Укажите границы проверенного участка диалога.")
+            if not strict:
+                omission = item.get("omission")
+                if type(omission) is not bool:
+                    raise ValueError("Признак пропущенного действия omission должен быть логическим.")
+                requires_range = omission or (criterion["kind"] == "boolean" and item["answer"] is False)
+                if requires_range and "start_id" not in evidence:
+                    raise ValueError("Укажите границы проверенного участка диалога.")
             validated.append({
                 "criterion_id": criterion["id"],
                 "answer": item["answer"],
